@@ -59,6 +59,16 @@
         "command": "lumo.resetHistory",
         "title": "Lumo: Reset Chat History",
         "category": "Lumo"
+      },
+      {
+        "command": "lumo.setSessionId",
+        "title": "Lumo: Set Session ID (Secure Vault)",
+        "category": "Lumo"
+      },
+      {
+        "command": "lumo.clearSessionId",
+        "title": "Lumo: Clear Session ID from Vault",
+        "category": "Lumo"
       }
     ],
     "keybindings": [
@@ -98,7 +108,8 @@
         "lumo.sessionId": {
           "type": "string",
           "default": "",
-          "description": "Your Lumo Session-Id cookie (used if Client ID is not set)"
+          "markdownDeprecationMessage": "**Deprecated** – storing the Session ID here is insecure. Run the **Lumo: Set Session ID (Secure Vault)** command instead. Any value here will be automatically migrated to the OS key-chain on next launch and then erased.",
+          "description": "[DEPRECATED] Use the 'Lumo: Set Session ID (Secure Vault)' command (Ctrl+Shift+P) to store your Session-Id securely in the OS key-chain. Values stored here are automatically migrated and erased."
         },
         "lumo.apiEndpoint": {
           "type": "string",

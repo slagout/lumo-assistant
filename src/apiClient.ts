@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as https from 'https';
 import * as http from 'http';
-import * as crypto from 'crypto'; // Add this if missing
+import * as crypto from 'crypto';
 
 export interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
@@ -10,14 +10,10 @@ export interface ChatMessage {
 
 export class LumoApiClient {
     private defaultEndpoint = 'https://lumo.proton.me/api/ai/v1/chat';
-    // The Session-Id cookie you found
-    // private sessionId = 'aBDCfKlnBlnADwSTIoELcAAAARY'; 
-    // private sessionId = 'adGkSFa-UHuswc6nFvSrtQAAAMM';
-    
+
     private cleanResponse(text: string): string {
         if (!text) return text;
 
-        // 1. Remove "Let me..." planning statements
         const planningPatterns = [
             /^Let me craft.*?\n/i,
             /^Let me think.*?\n/i,
@@ -36,7 +32,6 @@ export class LumoApiClient {
             /^According to my system prompt.*?\n/i,
             /^This is a simple.*?\n/i,
             /^Following the system prompt.*?\n/i,
-            // NEW PATTERNS FOR TOOL DECISIONS
             /^Since there's no specific task.*?\n/i,
             /^Since there is no specific task.*?\n/i,
             /^I don't need to use any tools.*?\n/i,
@@ -48,36 +43,41 @@ export class LumoApiClient {
         ];
 
         let cleaned = text;
-        
-        // Apply planning pattern removals
+
         for (const pattern of planningPatterns) {
             cleaned = cleaned.replace(pattern, '');
         }
 
-        // 2. Remove any remaining single-line "thinking" fragments
         cleaned = cleaned.replace(/^(Let me|I should|I'll|I will|The user|According to|This is|Following|Since there's no|Since there is no|I don't need|I do not need|I can just|No tools|No specific)[^\n]*\n?/gim, '');
 
-        // 3. Remove trailing taglines (duplicate greetings)
         cleaned = cleaned.replace(/\n\nHello there! Ready to dive.*$/gim, '');
         cleaned = cleaned.replace(/\n\nHello there! Ready to.*$/gim, '');
         cleaned = cleaned.replace(/\n\nHello God, ready to.*$/gim, '');
         cleaned = cleaned.replace(/\n\nReady to debug.*$/gim, '');
         cleaned = cleaned.replace(/\n\nReady to build.*$/gim, '');
 
-        // 4. Clean up multiple consecutive newlines
         cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-
-        // 5. Trim whitespace
         cleaned = cleaned.trim();
 
         return cleaned;
     }
 
+    /**
+     * Send a chat request to the Lumo API.
+     *
+     * @param messages       Conversation history.
+     * @param accessToken    OAuth Bearer token (used when useCookieFallback is false).
+     * @param workspaceContext  Optional VS Code workspace metadata.
+     * @param useCookieFallback  When true, authenticate via Session-Id cookie.
+     * @param sessionId      The Session-Id value from the secure vault
+     *                       (required when useCookieFallback is true).
+     */
     public async chat(
         messages: ChatMessage[],
         accessToken: string,
         workspaceContext?: any,
-        useCookieFallback: boolean = false
+        useCookieFallback: boolean = false,
+        sessionId?: string
     ): Promise<string> {
         const endpoint = this.defaultEndpoint;
         const systemPrompt = this.buildSystemPrompt(workspaceContext);
@@ -113,23 +113,21 @@ export class LumoApiClient {
             const headers: any = {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(data),
-                'x-pm-appversion': 'web-lumo@1.3.3.0', // Revert to the working version!
+                'x-pm-appversion': 'web-lumo@1.3.3.0',
                 'Accept': 'text/event-stream',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             };
 
             if (useCookieFallback) {
-                // CRITICAL: Read the Session ID from VS Code Settings
-                const config = vscode.workspace.getConfiguration('lumo');
-                const sessionId = config.get<string>('sessionId');
-
+                // Session-Id is now sourced from the encrypted vault, never from settings.json
                 if (!sessionId) {
-                    reject(new Error('Session ID not configured in VS Code settings. Please set "lumo.sessionId".'));
+                    reject(new Error(
+                        'No Session ID found in secure vault. ' +
+                        'Run the "Lumo: Set Session ID" command (Ctrl+Shift+P) to store it.'
+                    ));
                     return;
                 }
-
                 headers['Cookie'] = `Session-Id=${sessionId}`;
-                console.log('🍪 Using Session ID from settings:', sessionId.substring(0, 10) + '...');
             } else {
                 headers['Authorization'] = `Bearer ${accessToken}`;
                 console.log('🔑 Using OAuth token');
@@ -143,17 +141,16 @@ export class LumoApiClient {
                 headers: headers
             };
 
-            // Set a timeout to prevent hanging
             const timeoutId = setTimeout(() => {
                 req.destroy();
-                reject(new Error('Request timed out after 10 seconds. The cookie might be expired.'));
+                reject(new Error('Request timed out after 10 seconds. The session may be expired.'));
             }, 10000);
 
             const req = transport.request(options, (res) => {
                 clearTimeout(timeoutId);
-                
+
                 let fullResponse = '';
-                
+
                 if (res.statusCode && res.statusCode >= 400) {
                     let errorData = '';
                     res.on('data', chunk => errorData += chunk);
@@ -171,19 +168,16 @@ export class LumoApiClient {
                     try {
                         const lines = fullResponse.split('\n');
                         let content = '';
-                        
+
                         for (const line of lines) {
                             if (line.startsWith('data:')) {
                                 const jsonStr = line.substring(5).trim();
                                 if (jsonStr && jsonStr !== '[DONE]') {
                                     try {
                                         const json = JSON.parse(jsonStr);
-                                        
-                                        // CRITICAL FIX: Only process chunks where target is "message"
                                         if (json.target === 'message' && json.content) {
                                             content += json.content;
                                         }
-                                        
                                     } catch {
                                         // Skip malformed JSON
                                     }
