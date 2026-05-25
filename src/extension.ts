@@ -4,6 +4,7 @@ import { LumoApiClient, ChatMessage } from './apiClient';
 import { LumoAuthProvider } from './authProvider'; // Keep this import
 import { LumoCompletionProvider } from './completionProvider';
 import { LumoSuggestionCommand } from './suggestionCommand';
+import { LumoSecretVault } from './secretVault';
 
 // --- GLOBAL VIEW PROVIDER REFERENCE ---
 let viewProvider: LumoViewProvider;
@@ -14,6 +15,7 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
     private apiClient: LumoApiClient;
     private messages: ChatMessage[] = [];
     private context: vscode.ExtensionContext;
+    private vault: LumoSecretVault;
 
     // Token Management
     private totalTokensUsed: number = 0;
@@ -32,9 +34,10 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
 
     private statusBar: vscode.StatusBarItem;
 
-    constructor(private readonly _extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
+    constructor(private readonly _extensionUri: vscode.Uri, context: vscode.ExtensionContext, vault: LumoSecretVault) {
         this.apiClient = new LumoApiClient();
         this.context = context;
+        this.vault = vault;
         this.loadChatHistory();
         
         // Initialize Status Bar
@@ -279,14 +282,12 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ command: 'thinking', state: true });
 
         try {
-            const config = vscode.workspace.getConfiguration('lumo');
-            const sessionId = config.get<string>('sessionId');
-            const useCookieFallback = !sessionId;
+            // Read Session-Id from encrypted vault, never from plaintext settings
+            const sessionId = await this.vault.getSessionId();
+            const useCookieFallback = !!sessionId;
 
             let accessToken = '';
-            if (useCookieFallback) {
-                accessToken = 'dummy-for-cookie-mode';
-            } else {
+            if (!useCookieFallback) {
                 try {
                     const session = await vscode.authentication.getSession('lumo-auth', ['lumo'], { silent: true });
                     if (session) accessToken = session.accessToken;
@@ -298,7 +299,8 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
                 this.messages,
                 accessToken,
                 workspaceContext,
-                useCookieFallback
+                useCookieFallback,
+                sessionId
             );
 
             this.messages.push({ role: 'assistant', content: response });
@@ -350,14 +352,12 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ command: 'thinking', state: true });
 
         try {
-            const config = vscode.workspace.getConfiguration('lumo');
-            const sessionId = config.get<string>('sessionId');
-            const useCookieFallback = !sessionId;
+            // Read Session-Id from encrypted vault, never from plaintext settings
+            const sessionId = await this.vault.getSessionId();
+            const useCookieFallback = !!sessionId;
 
             let accessToken = '';
-            if (useCookieFallback) {
-                accessToken = 'dummy-for-cookie-mode';
-            } else {
+            if (!useCookieFallback) {
                 try {
                     const session = await vscode.authentication.getSession('lumo-auth', ['lumo'], { silent: true });
                     if (session) accessToken = session.accessToken;
@@ -369,7 +369,8 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
                 this.messages,
                 accessToken,
                 workspaceContext,
-                useCookieFallback
+                useCookieFallback,
+                sessionId
             );
 
             this.messages.push({ role: 'assistant', content: response });
@@ -405,22 +406,18 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
         let actionLabel: string;
 
         if (shellName === 'pwsh' && platform !== 'win32') {
-            // PowerShell Core on macOS/Linux
             message = `PowerShell Core (pwsh) is not installed on your ${platform}.`;
             installLink = 'https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell';
             actionLabel = 'Open Install Guide';
         } else if (shellName === 'bash' && platform === 'win32') {
-            // Git Bash on Windows
             message = 'Git Bash is not installed on your Windows machine.';
             installLink = 'https://git-scm.com/download/win';
             actionLabel = 'Download Git Bash';
         } else if (shellName === 'wsl' && platform === 'win32') {
-            // WSL on Windows
             message = 'Windows Subsystem for Linux (WSL) is not enabled on your Windows machine.';
             installLink = 'https://learn.microsoft.com/en-us/windows/wsl/install';
             actionLabel = 'Enable WSL';
         } else {
-            // Generic fallback
             message = `Required shell (${shellName}) is not available on your system.`;
             installLink = 'https://code.visualstudio.com/docs/editor/integrated-terminal';
             actionLabel = 'Learn More';
@@ -446,12 +443,9 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
 
         if (shellHint === 'pwsh') {
             if (process.platform === 'win32') {
-                // Windows: Use built-in PowerShell
                 shellPath = 'powershell.exe';
                 terminalName = 'Windows PowerShell';
-                // Built-in, so it should always exist
             } else {
-                // macOS/Linux: Check if pwsh is in PATH
                 try {
                     const { execSync } = require('child_process');
                     execSync('which pwsh', { stdio: 'ignore' });
@@ -478,7 +472,6 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
                     shellExists = false;
                 }
             } else {
-                // macOS/Linux: /bin/bash should exist
                 shellPath = '/bin/bash';
                 terminalName = 'Bash';
             }
@@ -488,7 +481,6 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
                 shellPath = 'cmd.exe';
                 terminalName = 'Command Prompt';
             } else {
-                // macOS/Linux: No cmd.exe, fallback to default
                 shellExists = false;
             }
         }
@@ -593,13 +585,8 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
             return `<html><body><h2>Error: Could not load chatPanel.html</h2><p>Make sure src/webview/chatPanel.html exists.</p></body></html>`;
         }
     
-        // CRITICAL FIX: Ensure we inject a valid JSON array string
-        // JSON.stringify on an array produces a string like [{"role":"user"...}]
-        // This is safe to embed in JS as long as we don't double-escape it.
         const messagesJson = JSON.stringify(initialMessages);
     
-        // Replace the placeholder with the raw JSON string
-        // We use a regex to ensure we replace the exact placeholder
         html = html.replace('/*INITIAL_MESSAGES*/', messagesJson);
         html = html.replace('/*CSS_URI*/', cssUri.toString());
         html = html.replace('/*JS_URI*/', jsUri.toString());
@@ -610,8 +597,21 @@ class LumoViewProvider implements vscode.WebviewViewProvider {
 }
 
 // --- MAIN ACTIVATION ---
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     console.log('🚀 Lumo is awakening... 💫');
+
+    // ── Secure Vault ─────────────────────────────────────────────────────────
+    // Initialise vault backed by VS Code SecretStorage (OS key-chain).
+    const vault = new LumoSecretVault(context.secrets);
+
+    // One-time migration: move any plaintext Session-Id out of settings.json.
+    const migrated = await vault.migrateFromSettings();
+    if (migrated) {
+        vscode.window.showInformationMessage(
+            '🔐 Lumo: Your Session ID has been moved to secure (encrypted) storage. ' +
+            'It has been removed from settings.json.'
+        );
+    }
 
     // Register Auth Provider
     const authProvider = new LumoAuthProvider(context);
@@ -624,7 +624,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // Register Sidebar View Provider
-    viewProvider = new LumoViewProvider(context.extensionUri, context);
+    viewProvider = new LumoViewProvider(context.extensionUri, context, vault);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider('lumo.chatView', viewProvider)
     );
@@ -644,7 +644,38 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(suggestDisposable);
 
-    // Register Commands
+    // ── Vault Commands ────────────────────────────────────────────────────────
+
+    // lumo.setSessionId: prompt with masked input, store in SecretStorage
+    const setSessionIdCommand = vscode.commands.registerCommand('lumo.setSessionId', async () => {
+        const input = await vscode.window.showInputBox({
+            prompt: 'Paste your Proton Session-Id cookie value',
+            placeHolder: 'e.g. aBDCfKlnBlnADwSTIoELcAAAARY',
+            password: true,          // masks input so it never appears on screen
+            ignoreFocusOut: true,
+            validateInput: (val) => val.trim().length > 0 ? null : 'Session ID cannot be empty'
+        });
+        if (!input) return;
+        await vault.storeSessionId(input.trim());
+        vscode.window.showInformationMessage('🔐 Session ID stored securely in the OS key-chain vault.');
+    });
+
+    // lumo.clearSessionId: remove from vault after confirmation
+    const clearSessionIdCommand = vscode.commands.registerCommand('lumo.clearSessionId', async () => {
+        const confirm = await vscode.window.showWarningMessage(
+            'Remove the stored Session ID from the secure vault?',
+            { modal: true },
+            'Remove'
+        );
+        if (confirm !== 'Remove') return;
+        await vault.deleteSessionId();
+        vscode.window.showInformationMessage('🗑️ Session ID removed from vault.');
+    });
+
+    context.subscriptions.push(setSessionIdCommand, clearSessionIdCommand);
+
+    // ── Standard Commands ─────────────────────────────────────────────────────
+
     const signInCommand = vscode.commands.registerCommand('lumo.signIn', async () => {
         try {
             const session = await vscode.authentication.getSession('lumo-auth', ['lumo'], { createIfNone: true });
